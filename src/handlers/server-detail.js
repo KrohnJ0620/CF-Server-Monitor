@@ -735,6 +735,7 @@ export async function handleServerDetail(request, env, sys, viewId) {
     const serverId = "${viewId}";
     let currentHours = 1;
     let statusTimer = null;
+    let cachedOneHourData = null;
     
     // 格式化工具
     const formatBytes = (bytes) => {
@@ -1133,12 +1134,28 @@ export async function handleServerDetail(request, env, sys, viewId) {
     // =============================================
     async function loadAllHistory(hours) {
       try {
-        // 一次性获取所有指标数据
-        const res = await fetch(\`/api/history/all?id=\${serverId}&hours=\${hours}\`);
-        if (!res.ok) return;
-        const allData = await res.json();
+        let allData;
         
-        // 更新各个图表（数据格式与 updateChartDataset 期望一致：{ timestamp: value }）
+        if (hours <= 1.05) {
+          const res = await fetch(\`/api/history/all?id=\${serverId}&hours=1\`);
+          if (!res.ok) return;
+          allData = await res.json();
+          cachedOneHourData = allData;
+        } else {
+          if (!cachedOneHourData) {
+            const res1h = await fetch(\`/api/history/all?id=\${serverId}&hours=1\`);
+            if (res1h.ok) {
+              cachedOneHourData = await res1h.json();
+            }
+          }
+          
+          const resAgg = await fetch(\`/api/history/all?id=\${serverId}&hours=\${hours}\`);
+          if (!resAgg.ok) return;
+          const aggData = await resAgg.json();
+          
+          allData = cachedOneHourData ? [...cachedOneHourData, ...aggData] : aggData;
+        }
+        
         updateChartDataset(charts.cpu, 0, allData, 'timestamp', 'cpu');
         updateChartDataset(charts.ram, 0, allData, 'timestamp', 'ram');
         updateChartDataset(charts.disk, 0, allData, 'timestamp', 'disk');
@@ -1152,10 +1169,8 @@ export async function handleServerDetail(request, env, sys, viewId) {
         updateChartDataset(charts.ping, 2, allData, 'timestamp', 'ping_cm');
         updateChartDataset(charts.ping, 3, allData, 'timestamp', 'ping_bd');
         
-        // 更新 X 轴时间单位
         updateAllChartTimeUnits(hours);
         
-        // 更新最后更新时间
         document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
         
       } catch (e) {

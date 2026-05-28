@@ -183,11 +183,18 @@ const DELETE_RAW_DATA = false;
 
 const AGGREGATE_PHASES = [
   {
+    name: '30分钟-1小时(2分钟桶)',
+    minHours: 0.5,
+    maxHours: 1,
+    bucketSeconds: 120,
+    sourceBucketSeconds: null
+  },
+  {
     name: '1-3小时(4分钟桶)',
     minHours: 1,
     maxHours: 3,
     bucketSeconds: 240,
-    sourceBucketSeconds: null
+    sourceBucketSeconds: 120
   },
   {
     name: '3-6小时(8分钟桶)',
@@ -456,6 +463,7 @@ async function aggregateFromAggregated(db, startTime, endTime, targetBucketSecon
 
 function getBucketSizesForHours(hours) {
   const sizes = [];
+  if (hours > 0.5) sizes.push(120);
   if (hours > 1) sizes.push(240);
   if (hours > 3) sizes.push(480);
   if (hours > 6) sizes.push(960);
@@ -484,8 +492,6 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
   const now = Date.now();
   const cutoff = now - (hours * 60 * 60 * 1000);
   
-  const lastAggregatedTo = await getLastAggregatedTo(db);
-  
   if (hours <= 1.05) {
     const result = await db.prepare(`
       SELECT timestamp, ${columns}
@@ -502,56 +508,43 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
     }));
   }
   
-  const oneHourMs = 60 * 60 * 1000;
-  const defaultAggregatedTo = now - oneHourMs;
-  const aggregatedTo = lastAggregatedTo || defaultAggregatedTo;
-  
-  const bucketSizes = getBucketSizesForHours(hours);
   const aggColumns = mapColumnsToAggregated(columns);
+  const aggCutoff = now - (1 * 60 * 60 * 1000);
   
-  let allAggData = [];
+  let result = [];
   
-  if (aggregatedTo > cutoff) {
-    for (const bucketSize of bucketSizes) {
-      const aggResult = await db.prepare(`
-        SELECT 
-          bucket AS timestamp,
-          ${aggColumns}
-        FROM metrics_aggregated
-        WHERE server_id = ?
-          AND bucket_size = ?
-          AND bucket >= ?
-          AND bucket < ?
-        ORDER BY bucket ASC
-      `).bind(serverId, bucketSize, cutoff, aggregatedTo).all();
-      
-      const phaseData = aggResult.results.map(row => ({
-        ...row,
-        timestamp: Number(row.timestamp)
-      }));
-      
-      allAggData = allAggData.concat(phaseData);
-    }
+  for (const phase of AGGREGATE_PHASES) {
+    const phaseStart = now - (phase.maxHours * 60 * 60 * 1000);
+    const phaseEnd = now - (phase.minHours * 60 * 60 * 1000);
+    
+    const queryStart = Math.max(cutoff, phaseStart);
+    const queryEnd = Math.min(phaseEnd, aggCutoff);
+    
+    if (queryStart >= queryEnd) continue;
+    
+    const aggResult = await db.prepare(`
+      SELECT 
+        bucket AS timestamp,
+        ${aggColumns}
+      FROM metrics_aggregated
+      WHERE server_id = ?
+        AND bucket_size = ?
+        AND bucket >= ?
+        AND bucket < ?
+      ORDER BY bucket ASC
+    `).bind(serverId, phase.bucketSeconds, queryStart, queryEnd).all();
+    
+    const phaseData = aggResult.results.map(row => ({
+      ...row,
+      timestamp: Number(row.timestamp)
+    }));
+    
+    result = result.concat(phaseData);
   }
   
-  const historyResult = await db.prepare(`
-    SELECT timestamp, ${columns}
-    FROM metrics_history
-    WHERE server_id = ?
-      AND typeof(timestamp) = 'integer'
-      AND timestamp >= ?
-    ORDER BY timestamp ASC
-  `).bind(serverId, Math.min(aggregatedTo, cutoff)).all();
+  result.sort((a, b) => a.timestamp - b.timestamp);
   
-  const historyData = historyResult.results.map(row => ({
-    ...row,
-    timestamp: typeof row.timestamp === 'string' ? new Date(row.timestamp).getTime() : Number(row.timestamp)
-  }));
-  
-  const merged = [...allAggData, ...historyData];
-  merged.sort((a, b) => a.timestamp - b.timestamp);
-  
-  return merged;
+  return result;
 }
 
 export async function cleanupOldData(db, force = false) {
